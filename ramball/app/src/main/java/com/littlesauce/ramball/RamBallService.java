@@ -192,7 +192,28 @@ public class RamBallService extends Service {
         });
     }
 
-    /** Ball size is independent of font size. */
+    /** Ball size is independent of font size. */    /**
+     * Hover events stop at the first child that consumes them, so the panel root
+     * never sees HOVER_ENTER when the pointer lands on a CheckBox or SeekBar.
+     * That is why the panel used to vanish out from under the cursor.
+     * Attach the keep-alive listener to every child recursively.
+     */
+    private void attachHoverKeepAlive(View v) {
+        v.setOnHoverListener((vv, e) -> {
+            int a = e.getAction();
+            if (a == MotionEvent.ACTION_HOVER_ENTER || a == MotionEvent.ACTION_HOVER_MOVE) {
+                ui.removeCallbacks(hidePanelDelayed);
+            } else if (a == MotionEvent.ACTION_HOVER_EXIT) {
+                ui.postDelayed(hidePanelDelayed, 1500);
+            }
+            return false;   // let children keep their own hover styling
+        });
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) attachHoverKeepAlive(g.getChildAt(i));
+        }
+    }
+
     private void applyBallScale() {
         if (ball == null) return;
         float s = sp.getFloat("ball_scale", 1f);
@@ -351,6 +372,17 @@ public class RamBallService extends Service {
         });
         btns.addView(clear);
 
+        Button selectAll = new Button(this);
+        selectAll.setText("\u5168\u9009");
+        selectAll.setTextSize(9);
+        selectAll.setOnClickListener(v -> {
+            for (int i = 0; i < list.getChildCount(); i++) {
+                View c = list.getChildAt(i);
+                if (c instanceof CheckBox) ((CheckBox) c).setChecked(true);
+            }
+        });
+        btns.addView(selectAll);
+
         Button apply = new Button(this);
         apply.setText("\u6e05\u7406");
         apply.setTextSize(9);
@@ -451,18 +483,15 @@ public class RamBallService extends Service {
         int ballH = (ball != null && ball.getHeight() > 0) ? ball.getHeight() : dp(52);
         int screenH = getResources().getDisplayMetrics().heightPixels;
         int estH = dp(360);
-        int below = lp.y + ballH + dp(6);
+        int gap = dp(sp.getInt("panel_gap", 6));
+        int below = lp.y + ballH + gap;
         if (below + estH > screenH - dp(8)) {
-            plp.y = Math.max(dp(8), lp.y - estH - dp(6));   // open upwards
+            plp.y = Math.max(dp(8), lp.y - estH - gap);   // open upwards
         } else {
             plp.y = below;
         }
 
-        root.setOnHoverListener((v, e) -> {
-            if (e.getAction() == MotionEvent.ACTION_HOVER_ENTER) ui.removeCallbacks(hidePanelDelayed);
-            else if (e.getAction() == MotionEvent.ACTION_HOVER_EXIT) ui.postDelayed(hidePanelDelayed, 800);
-            return false;
-        });
+        attachHoverKeepAlive(root);
 
         try { wm.addView(root, plp); mainPanel = root; } catch (Exception ignored) {}
     }
@@ -545,6 +574,30 @@ public class RamBallService extends Service {
             @Override public void onStopTrackingTouch(SeekBar s) { dragging = false; }
         });
         overlay.addView(bs, new LinearLayout.LayoutParams(dp(180), LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        final TextView gapVal = new TextView(this);
+        gapVal.setTextColor(Color.parseColor("#FF90CAF9"));
+        gapVal.setTextSize(10);
+        gapVal.setText("\u9762\u677f\u95f4\u8ddd " + sp.getInt("panel_gap", 6) + "dp");
+        overlay.addView(gapVal);
+
+        SeekBar gap = new SeekBar(this);
+        gap.setMax(40);
+        gap.setProgress(sp.getInt("panel_gap", 6));
+        gap.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean u) {
+                gapVal.setText("\u9762\u677f\u95f4\u8ddd " + p + "dp");
+                sp.edit().putInt("panel_gap", p).apply();
+                if (mainPanel != null) {
+                    // re-layout the panel at the new offset
+                    hideMainPanel();
+                    showMainPanel(false);
+                }
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) { dragging = true; }
+            @Override public void onStopTrackingTouch(SeekBar s) { dragging = false; }
+        });
+        overlay.addView(gap, new LinearLayout.LayoutParams(dp(180), LinearLayout.LayoutParams.WRAP_CONTENT));
         Button close = new Button(this);
         close.setText("\u5173\u95ed");
         close.setTextSize(9);
