@@ -18,6 +18,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -31,8 +32,8 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.FileReader;
-import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -48,7 +49,7 @@ public class RamBallService extends Service {
     private WindowManager wm;
     private TextView ball;
     private WindowManager.LayoutParams lp;
-    private View volumePanel, procPanel, settingsPanel;
+    private View mainPanel;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private SharedPreferences sp;
 
@@ -69,7 +70,15 @@ public class RamBallService extends Service {
         }
     };
 
-    private final Runnable hideProcDelayed = () -> hideProcPanel();
+    private volatile boolean dragging = false;
+
+    private final Runnable hidePanelDelayed = new Runnable() {
+        @Override public void run() {
+            // never hide while a slider is being dragged
+            if (dragging) { ui.postDelayed(this, 900); return; }
+            hideMainPanel();
+        }
+    };
 
     @Override public void onCreate() {
         super.onCreate();
@@ -90,7 +99,7 @@ public class RamBallService extends Service {
         Notification.Builder b = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(this, CH_ID) : new Notification.Builder(this);
         return b.setContentTitle("RamBall")
-                .setContentText("点=清理 长按=音量 悬停=进程 右键=设置")
+                .setContentText("悬停=面板  单击=清理  长按=音量")
                 .setSmallIcon(android.R.drawable.ic_menu_manage)
                 .setOngoing(true).build();
     }
@@ -108,9 +117,9 @@ public class RamBallService extends Service {
         ball.setTextColor(Color.WHITE);
         ball.setGravity(Gravity.CENTER);
         ball.setBackground(d);
-        ball.setPadding(dp(6), dp(4), dp(6), dp(4));
         ball.setAlpha(sp.getFloat("opacity", 1f));
         ball.setTextSize(sp.getFloat("font_size", 9f));
+        applyBallScale();
 
         lp = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -128,7 +137,6 @@ public class RamBallService extends Service {
 
         setupTouch();
         setupHover();
-        setupRightClick();
         wm.addView(ball, lp);
         paint();
     }
@@ -162,23 +170,10 @@ public class RamBallService extends Service {
                 case MotionEvent.ACTION_CANCEL: {
                     long dur = System.currentTimeMillis() - t0[0];
                     if (!moved[0]) {
-                        if (dur >= 600) {
-                            showVolumePanel();
-                        } else {
-                            String act = sp.getString("click_action", "clean");
-                            if ("panel".equals(act)) showProcPanel();
-                            else if ("settings".equals(act)) showSettingsPanel();
-                            else clean();
-                        }
+                        if (dur >= 600) showMainPanel(true);
+                        else clean();
                     }
                     return true;
-                }
-                case MotionEvent.ACTION_BUTTON_PRESS: {
-                    if (e.getButtonState() == MotionEvent.BUTTON_SECONDARY) {
-                        showSettingsPanel();
-                        return true;
-                    }
-                    return false;
                 }
             }
             return false;
@@ -188,28 +183,28 @@ public class RamBallService extends Service {
     private void setupHover() {
         ball.setOnHoverListener((v, e) -> {
             if (e.getAction() == MotionEvent.ACTION_HOVER_ENTER) {
-                ui.removeCallbacks(hideProcDelayed);
-                showProcPanel();
+                ui.removeCallbacks(hidePanelDelayed);
+                if (mainPanel == null) showMainPanel(false);
             } else if (e.getAction() == MotionEvent.ACTION_HOVER_EXIT) {
-                ui.postDelayed(hideProcDelayed, 700);
+                ui.postDelayed(hidePanelDelayed, 800);
             }
             return false;
         });
     }
 
-    private void setupRightClick() {
-        ball.setOnGenericMotionListener((v, e) -> {
-            if (e.getAction() == MotionEvent.ACTION_BUTTON_PRESS
-                    && e.getButtonState() == MotionEvent.BUTTON_SECONDARY) {
-                showSettingsPanel();
-                return true;
-            }
-            return false;
-        });
-    }
-
-    private void paint() {
+    /** Ball size is independent of font size. */
+    private void applyBallScale() {
         if (ball == null) return;
+        float s = sp.getFloat("ball_scale", 1f);
+        if (s < 0.5f) s = 0.5f;
+        if (s > 2.0f) s = 2.0f;
+        ball.setPadding((int) (dp(6) * s), (int) (dp(4) * s), (int) (dp(6) * s), (int) (dp(4) * s));
+        ball.setMinWidth((int) (dp(92) * s));
+        ball.setMinHeight((int) (dp(38) * s));
+        ball.requestLayout();
+    }
+
+    private void paint() {        if (ball == null) return;
         ball.setText("\u2191" + curUp + "  \u2193" + curDown + "\n"
                 + "C " + (int) curCpu + "%   R " + curRamPct + "%");
         ball.setTextSize(sp.getFloat("font_size", 9f));
@@ -262,12 +257,22 @@ public class RamBallService extends Service {
         return String.format("%.1fM", b / 1048576.0);
     }
 
-    // ---------- process picker (hover) ----------
+    private String readFile(String path) {
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader br = new BufferedReader(new FileReader(path))) {
+            String l;
+            while ((l = br.readLine()) != null) sb.append(l).append('\n');
+        } catch (Exception ignored) {}
+        return sb.toString();
+    }
 
-    private void showProcPanel() {
-        if (procPanel != null) return;
-        hideVolumePanel();
-        hideSettingsPanel();
+    // ---------- main panel: processes + volume + brightness + config ----------
+
+    private void showMainPanel(boolean forceShow) {
+        if (mainPanel != null) {
+            if (forceShow) hideMainPanel();
+            return;
+        }
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -277,13 +282,31 @@ public class RamBallService extends Service {
         bg.setStroke(2, Color.parseColor("#FF64B5F6"));
         root.setBackground(bg);
         root.setPadding(dp(12), dp(10), dp(12), dp(10));
+        root.setAlpha(sp.getFloat("opacity", 1f));
+
+        // --- header row: title + config button
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
 
         TextView title = new TextView(this);
         title.setText("\u52fe\u9009\u8981\u6e05\u7406\u7684\u8fdb\u7a0b");
         title.setTextColor(Color.WHITE);
         title.setTextSize(11);
-        root.addView(title);
+        title.setPadding(0, dp(4), 0, 0);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        header.addView(title, tlp);
 
+        Button cfgBtn = new Button(this);
+        cfgBtn.setText("\u2699");
+        cfgBtn.setTextSize(12);
+        cfgBtn.setPadding(dp(6), 0, dp(6), 0);
+        cfgBtn.setOnClickListener(v -> showConfigInline(root, forceShow));
+        header.addView(cfgBtn);
+
+        root.addView(header);
+
+        // --- process list
         Set<String> saved = sp.getStringSet("selected_pkgs", new HashSet<String>());
         List<String[]> procs = listProcesses();
 
@@ -293,24 +316,26 @@ public class RamBallService extends Service {
 
         for (String[] p : procs) {
             CheckBox cb = new CheckBox(this);
-            cb.setText(p[1] + "  (" + p[2] + " MB)");
+            cb.setText(p[1] + "  (" + p[2] + ")");
             cb.setTextColor(Color.WHITE);
             cb.setTextSize(10);
             cb.setChecked(saved.contains(p[0]));
             cb.setTag(p[0]);
-            cb.setOnCheckedChangeListener((v, checked) -> saveSelection());
+            cb.setOnCheckedChangeListener((v, checked) -> saveSelection(list));
             list.addView(cb);
         }
         if (procs.isEmpty()) {
             TextView empty = new TextView(this);
-            empty.setText("(\u6ca1\u6709\u53ef\u6e05\u7406\u7684\u8fdb\u7a0b)");
+            empty.setText("(\u672a\u627e\u5230\u53ef\u6e05\u7406\u7684\u8fdb\u7a0b)");
             empty.setTextColor(Color.GRAY);
             empty.setTextSize(10);
             list.addView(empty);
         }
         sv.addView(list);
-        root.addView(sv, new LinearLayout.LayoutParams(dp(220), dp(200)));
+        root.addView(sv, new LinearLayout.LayoutParams(dp(240), dp(150)));
+        root.setTag(list);
 
+        // --- buttons
         LinearLayout btns = new LinearLayout(this);
         btns.setOrientation(LinearLayout.HORIZONTAL);
 
@@ -326,14 +351,92 @@ public class RamBallService extends Service {
         });
         btns.addView(clear);
 
+        Button apply = new Button(this);
+        apply.setText("\u6e05\u7406");
+        apply.setTextSize(9);
+        apply.setOnClickListener(v -> { clean(); hideMainPanel(); });
+        btns.addView(apply);
+
         Button done = new Button(this);
         done.setText("\u5b8c\u6210");
         done.setTextSize(9);
-        done.setOnClickListener(v -> hideProcPanel());
+        done.setOnClickListener(v -> hideMainPanel());
         btns.addView(done);
 
         root.addView(btns);
 
+        // --- volume slider
+        final AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+        final int vmax = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+
+        LinearLayout volRow = new LinearLayout(this);
+        volRow.setOrientation(LinearLayout.HORIZONTAL);
+        volRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        final TextView volLabel = new TextView(this);
+        volLabel.setText("\u97f3\u91cf");
+        volLabel.setTextColor(Color.WHITE);
+        volLabel.setTextSize(10);
+        volLabel.setWidth(dp(34));
+        volRow.addView(volLabel);
+
+        SeekBar vsb = new SeekBar(this);
+        vsb.setMax(vmax);
+        vsb.setProgress(am.getStreamVolume(AudioManager.STREAM_MUSIC));
+        vsb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                if (fromUser) am.setStreamVolume(AudioManager.STREAM_MUSIC, p, 0);
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) { dragging = true; }
+            @Override public void onStopTrackingTouch(SeekBar s) {
+                dragging = false;
+                ui.removeCallbacks(hidePanelDelayed);
+            }
+        });
+        volRow.addView(vsb, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        root.addView(volRow);
+
+        // --- brightness slider
+        LinearLayout briRow = new LinearLayout(this);
+        briRow.setOrientation(LinearLayout.HORIZONTAL);
+        briRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        final TextView briLabel = new TextView(this);
+        briLabel.setText("\u4eae\u5ea6");
+        briLabel.setTextColor(Color.WHITE);
+        briLabel.setTextSize(10);
+        briLabel.setWidth(dp(34));
+        briRow.addView(briLabel);
+
+        int curBri = 128;
+        try { curBri = Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS); }
+        catch (Exception ignored) {}
+
+        SeekBar bsb = new SeekBar(this);
+        bsb.setMax(255);
+        bsb.setProgress(curBri);
+        bsb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                if (!fromUser) return;
+                try {
+                    Settings.System.putInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS, p);
+                } catch (Exception e) {
+                    Toast.makeText(RamBallService.this,
+                            "\u9700\u8981\u4fee\u6539\u7cfb\u7edf\u8bbe\u7f6e\u6743\u9650", Toast.LENGTH_SHORT).show();
+                }
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) { dragging = true; }
+            @Override public void onStopTrackingTouch(SeekBar s) {
+                dragging = false;
+                ui.removeCallbacks(hidePanelDelayed);
+            }
+        });
+        briRow.addView(bsb, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        root.addView(briRow);
+
+        // --- position: below the ball, or above it when there is no room
         WindowManager.LayoutParams plp = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -343,115 +446,48 @@ public class RamBallService extends Service {
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT);
         plp.gravity = Gravity.TOP | Gravity.END;
-        // follow the ball: same x, right below it
         plp.x = lp.x;
+
         int ballH = (ball != null && ball.getHeight() > 0) ? ball.getHeight() : dp(52);
-        plp.y = lp.y + ballH + dp(6);
+        int screenH = getResources().getDisplayMetrics().heightPixels;
+        int estH = dp(360);
+        int below = lp.y + ballH + dp(6);
+        if (below + estH > screenH - dp(8)) {
+            plp.y = Math.max(dp(8), lp.y - estH - dp(6));   // open upwards
+        } else {
+            plp.y = below;
+        }
 
         root.setOnHoverListener((v, e) -> {
-            if (e.getAction() == MotionEvent.ACTION_HOVER_ENTER) ui.removeCallbacks(hideProcDelayed);
-            else if (e.getAction() == MotionEvent.ACTION_HOVER_EXIT) ui.postDelayed(hideProcDelayed, 700);
+            if (e.getAction() == MotionEvent.ACTION_HOVER_ENTER) ui.removeCallbacks(hidePanelDelayed);
+            else if (e.getAction() == MotionEvent.ACTION_HOVER_EXIT) ui.postDelayed(hidePanelDelayed, 800);
             return false;
         });
 
-        try { wm.addView(root, plp); procPanel = root; } catch (Exception ignored) {}
+        try { wm.addView(root, plp); mainPanel = root; } catch (Exception ignored) {}
     }
 
-    private void saveSelection() {
-        if (procPanel == null) return;
-        try {
-            LinearLayout root = (LinearLayout) procPanel;
-            ScrollView sv = (ScrollView) root.getChildAt(1);
-            LinearLayout list = (LinearLayout) sv.getChildAt(0);
-            Set<String> sel = new HashSet<>();
-            for (int i = 0; i < list.getChildCount(); i++) {
-                View c = list.getChildAt(i);
-                if (c instanceof CheckBox && ((CheckBox) c).isChecked())
-                    sel.add((String) c.getTag());
-            }
-            sp.edit().putStringSet("selected_pkgs", sel).apply();
-        } catch (Exception ignored) {}
-    }
-
-    private List<String[]> listProcesses() {
-        // getRunningAppProcesses() only returns our own process since Android 5.1,
-        // so enumerate through root's ps instead.
-        List<String[]> out = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        PackageManager pm = getPackageManager();
-        Process p = null;
-        try {
-            // toybox ps on this ROM does not support --no-headers, so skip the header row
-            p = Runtime.getRuntime().exec(new String[]{
-                    "su", "-c", "ps -A -o USER,NAME,RSS 2>/dev/null"});
-            BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
-            String line;
-            while ((line = r.readLine()) != null) {
-                String[] f = line.trim().split("\\s+");
-                if (f.length < 3) continue;
-                String user = f[0];
-                String name = f[1];
-                String rss = f[2];
-                if ("USER".equals(user)) continue;
-                if (name.startsWith("[")) continue;
-                if (!user.startsWith("u0_a")) continue;
-                if (name.contains(":")) continue;
-                if (name.equals(getPackageName())) continue;
-                if (ALWAYS_PROTECT.contains(name)) continue;
-                if (name.equals("cn.bvtv.beta")) continue;
-                if (!seen.add(name)) continue;
-                int mb = 0;
-                try { mb = (int) (Long.parseLong(rss) / 1024); } catch (Exception ignored) {}
-                String label = name;
-                try {
-                    ApplicationInfo ai = pm.getApplicationInfo(name, 0);
-                    label = pm.getApplicationLabel(ai).toString();
-                } catch (Exception ignored) {}
-                out.add(new String[]{name, label, String.valueOf(mb)});
-            }
-            p.waitFor();
-        } catch (Exception ignored) {
-        } finally {
-            if (p != null) try { p.destroy(); } catch (Exception ignored) {}
-        }
-        Collections.sort(out, (a, b) -> a[1].compareToIgnoreCase(b[1]));
-        return out;
-    }
-
-    private void hideProcPanel() {
-        if (procPanel != null) {
-            try { wm.removeView(procPanel); } catch (Exception ignored) {}
-            procPanel = null;
-        }
-    }
-
-    // ---------- settings (right click) ----------
-
-    private void showSettingsPanel() {
-        if (settingsPanel != null) { hideSettingsPanel(); return; }
-        hideVolumePanel();
-        hideProcPanel();
-
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
+    private void showConfigInline(LinearLayout panel, boolean forceShow) {
+        LinearLayout overlay = new LinearLayout(this);
+        overlay.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable bg = new GradientDrawable();
         bg.setCornerRadius(dp(14));
-        bg.setColor(Color.parseColor("#F0121A24"));
-        bg.setStroke(2, Color.parseColor("#FF64B5F6"));
-        root.setBackground(bg);
-        root.setPadding(dp(16), dp(12), dp(16), dp(16));
+        bg.setColor(Color.parseColor("#F0182028"));
+        bg.setStroke(2, Color.parseColor("#FFFFB74D"));
+        overlay.setBackground(bg);
+        overlay.setPadding(dp(14), dp(10), dp(14), dp(14));
 
         TextView t = new TextView(this);
-        t.setText("\u8bbe\u7f6e");
+        t.setText("\u914d\u7f6e");
         t.setTextColor(Color.WHITE);
-        t.setTextSize(12);
-        root.addView(t);
+        t.setTextSize(11);
+        overlay.addView(t);
 
         final TextView fsVal = new TextView(this);
         fsVal.setTextColor(Color.parseColor("#FF90CAF9"));
         fsVal.setTextSize(10);
         fsVal.setText("\u5b57\u53f7 " + sp.getFloat("font_size", 9f));
-        root.addView(fsVal);
+        overlay.addView(fsVal);
 
         SeekBar fs = new SeekBar(this);
         fs.setMax(18);
@@ -466,13 +502,13 @@ public class RamBallService extends Service {
             @Override public void onStartTrackingTouch(SeekBar s) {}
             @Override public void onStopTrackingTouch(SeekBar s) {}
         });
-        root.addView(fs, new LinearLayout.LayoutParams(dp(200), LinearLayout.LayoutParams.WRAP_CONTENT));
+        overlay.addView(fs, new LinearLayout.LayoutParams(dp(180), LinearLayout.LayoutParams.WRAP_CONTENT));
 
         final TextView opVal = new TextView(this);
         opVal.setTextColor(Color.parseColor("#FF90CAF9"));
         opVal.setTextSize(10);
         opVal.setText("\u900f\u660e\u5ea6 " + (int) (sp.getFloat("opacity", 1f) * 100) + "%");
-        root.addView(opVal);
+        overlay.addView(opVal);
 
         SeekBar op = new SeekBar(this);
         op.setMax(100);
@@ -482,53 +518,42 @@ public class RamBallService extends Service {
                 opVal.setText("\u900f\u660e\u5ea6 " + p + "%");
                 sp.edit().putFloat("opacity", p / 100f).apply();
                 paint();
+                if (mainPanel != null) mainPanel.setAlpha(p / 100f);
             }
             @Override public void onStartTrackingTouch(SeekBar s) {}
             @Override public void onStopTrackingTouch(SeekBar s) {}
         });
-        root.addView(op, new LinearLayout.LayoutParams(dp(200), LinearLayout.LayoutParams.WRAP_CONTENT));
+        overlay.addView(op, new LinearLayout.LayoutParams(dp(180), LinearLayout.LayoutParams.WRAP_CONTENT));
 
-        TextView caLabel = new TextView(this);
-        caLabel.setTextColor(Color.WHITE);
-        caLabel.setTextSize(11);
-        caLabel.setText("\u5355\u51fb\u884c\u4e3a");
-        root.addView(caLabel);
+        final TextView bsVal = new TextView(this);
+        bsVal.setTextColor(Color.parseColor("#FF90CAF9"));
+        bsVal.setTextSize(10);
+        bsVal.setText("\u7403\u5927\u5c0f " + String.format("%.1f", sp.getFloat("ball_scale", 1f)) + "x");
+        overlay.addView(bsVal);
 
-        final String curAct = sp.getString("click_action", "clean");
-        final String[] acts = {"clean", "panel", "settings"};
-        final String[] actNames = {"\u6e05\u7406\u5185\u5b58", "\u5c55\u5f00\u8fdb\u7a0b", "\u6253\u5f00\u8bbe\u7f6e"};
-        LinearLayout actRow = new LinearLayout(this);
-        actRow.setOrientation(LinearLayout.HORIZONTAL);
-        for (int i = 0; i < acts.length; i++) {
-            final String key = acts[i];
-            final Button b = new Button(this);
-            b.setText((key.equals(curAct) ? "\u25cf " : "\u25cb ") + actNames[i]);
-            b.setTextSize(9);
-            b.setTag(key);
-            b.setOnClickListener(v -> {
-                sp.edit().putString("click_action", key).apply();
-                for (int j = 0; j < actRow.getChildCount(); j++) {
-                    View c = actRow.getChildAt(j);
-                    if (c instanceof Button) {
-                        String k = (String) c.getTag();
-                        String n = "clean".equals(k) ? "\u6e05\u7406\u5185\u5b58"
-                                : "panel".equals(k) ? "\u5c55\u5f00\u8fdb\u7a0b"
-                                : "\u6253\u5f00\u8bbe\u7f6e";
-                        ((Button) c).setText((k.equals(key) ? "\u25cf " : "\u25cb ") + n);
-                    }
-                }
-            });
-            actRow.addView(b);
-        }
-        root.addView(actRow);
-
+        SeekBar bs = new SeekBar(this);
+        bs.setMax(15);
+        bs.setProgress((int) ((sp.getFloat("ball_scale", 1f) - 0.5f) * 10));
+        bs.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean u) {
+                float v = 0.5f + p / 10f;
+                bsVal.setText("\u7403\u5927\u5c0f " + String.format("%.1f", v) + "x");
+                sp.edit().putFloat("ball_scale", v).apply();
+                applyBallScale();
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) { dragging = true; }
+            @Override public void onStopTrackingTouch(SeekBar s) { dragging = false; }
+        });
+        overlay.addView(bs, new LinearLayout.LayoutParams(dp(180), LinearLayout.LayoutParams.WRAP_CONTENT));
         Button close = new Button(this);
         close.setText("\u5173\u95ed");
         close.setTextSize(9);
-        close.setOnClickListener(v -> hideSettingsPanel());
-        root.addView(close);
+        close.setOnClickListener(v -> {
+            try { wm.removeView(overlay); } catch (Exception ignored) {}
+        });
+        overlay.addView(close);
 
-        WindowManager.LayoutParams splp = new WindowManager.LayoutParams(
+        WindowManager.LayoutParams olp = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
@@ -536,79 +561,95 @@ public class RamBallService extends Service {
                         : WindowManager.LayoutParams.TYPE_PHONE,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT);
-        splp.gravity = Gravity.CENTER;
-
-        try { wm.addView(root, splp); settingsPanel = root; } catch (Exception ignored) {}
+        olp.gravity = Gravity.CENTER;
+        try { wm.addView(overlay, olp); } catch (Exception ignored) {}
     }
 
-    private void hideSettingsPanel() {
-        if (settingsPanel != null) {
-            try { wm.removeView(settingsPanel); } catch (Exception ignored) {}
-            settingsPanel = null;
+    private void saveSelection(LinearLayout list) {
+        Set<String> sel = new HashSet<>();
+        for (int i = 0; i < list.getChildCount(); i++) {
+            View c = list.getChildAt(i);
+            if (c instanceof CheckBox && ((CheckBox) c).isChecked())
+                sel.add((String) c.getTag());
+        }
+        sp.edit().putStringSet("selected_pkgs", sel).apply();
+    }
+
+    /**
+     * Enumerates app processes by walking /proc directly.
+     * ActivityManager.getRunningAppProcesses() only returns our own process since
+     * Android 5.1, and the su binary on this ROM refuses non-shell callers
+     * ("su.real: not allowed"), so /proc is the only path that works.
+     */
+    private List<String[]> listProcesses() {
+        List<String[]> out = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        PackageManager pm = getPackageManager();
+
+        // Every direct process-enumeration API is walled off on this ROM:
+        //   getRunningAppProcesses()  -> only our own process (Android 5.1+)
+        //   getRunningServices()      -> only our own service (Android 8+)
+        //   new File("/proc")         -> one entry (hidepid=2 + untrusted_app)
+        // UsageStatsManager is a binder call into system_server and works as long
+        // as GET_USAGE_STATS is granted via appops.
+        android.app.usage.UsageStatsManager usm =
+                (android.app.usage.UsageStatsManager) getSystemService(Context.USAGE_STATS_SERVICE);
+        long now = System.currentTimeMillis();
+        java.util.List<android.app.usage.UsageStats> stats = null;
+        try {
+            stats = usm.queryUsageStats(android.app.usage.UsageStatsManager.INTERVAL_DAILY,
+                    now - 6L * 3600L * 1000L, now);
+        } catch (Exception e) {
+            android.util.Log.w("RamBall", "queryUsageStats failed", e);
+        }
+
+        if (stats == null || stats.isEmpty()) {
+            android.util.Log.w("RamBall", "UsageStats empty - GET_USAGE_STATS not granted?");
+            return out;
+        }
+
+        for (android.app.usage.UsageStats s : stats) {
+            String pkg = s.getPackageName();
+            if (pkg == null) continue;
+            if (pkg.equals(getPackageName())) continue;
+            if (ALWAYS_PROTECT.contains(pkg)) continue;
+            if (pkg.equals("cn.bvtv.beta")) continue;
+            if (!seen.add(pkg)) continue;
+            if (!hasLauncher(pm, pkg)) continue;
+
+            String label = pkg;
+            try {
+                ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
+                label = pm.getApplicationLabel(ai).toString();
+            } catch (Exception ignored) {}
+
+            long ago = Math.max(0, (now - s.getLastTimeUsed()) / 60000L);
+            out.add(new String[]{pkg, label, ago + "m"});
+        }
+
+        android.util.Log.i("RamBall", "listProcesses: usageStats=" + stats.size()
+                + " kept=" + out.size());
+        Collections.sort(out, (a, b) -> a[1].compareToIgnoreCase(b[1]));
+        return out;
+    }
+
+    private boolean hasLauncher(PackageManager pm, String pkg) {
+        try {
+            android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_MAIN);
+            i.addCategory(android.content.Intent.CATEGORY_LAUNCHER);
+            i.setPackage(pkg);
+            java.util.List<android.content.pm.ResolveInfo> ri =
+                    pm.queryIntentActivities(i, 0);
+            return ri != null && !ri.isEmpty();
+        } catch (Exception e) {
+            return false;
         }
     }
 
-    // ---------- volume ----------
-
-    private void showVolumePanel() {
-        if (volumePanel != null) { hideVolumePanel(); return; }
-        hideProcPanel();
-        hideSettingsPanel();
-
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable d = new GradientDrawable();
-        d.setCornerRadius(dp(18));
-        d.setColor(Color.parseColor("#F0101828"));
-        d.setStroke(2, Color.parseColor("#FF64B5F6"));
-        root.setBackground(d);
-        root.setPadding(dp(22), dp(16), dp(22), dp(20));
-
-        TextView title = new TextView(this);
-        title.setText("\u97f3\u91cf");
-        title.setTextColor(Color.WHITE);
-        title.setTextSize(11);
-        root.addView(title);
-
-        final AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
-        final int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
-        final TextView val = new TextView(this);
-        val.setTextColor(Color.parseColor("#FF90CAF9"));
-        val.setTextSize(13);
-        val.setText(String.valueOf(am.getStreamVolume(AudioManager.STREAM_MUSIC) * 100 / Math.max(1, max)));
-        root.addView(val);
-
-        SeekBar sb = new SeekBar(this);
-        sb.setMax(max);
-        sb.setProgress(am.getStreamVolume(AudioManager.STREAM_MUSIC));
-        sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
-                val.setText(String.valueOf(p * 100 / Math.max(1, max)));
-                if (fromUser) am.setStreamVolume(AudioManager.STREAM_MUSIC, p, 0);
-            }
-            @Override public void onStartTrackingTouch(SeekBar s) {}
-            @Override public void onStopTrackingTouch(SeekBar s) {}
-        });
-        root.addView(sb, new LinearLayout.LayoutParams(dp(180), LinearLayout.LayoutParams.WRAP_CONTENT));
-
-        WindowManager.LayoutParams vlp = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                        ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                        : WindowManager.LayoutParams.TYPE_PHONE,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                PixelFormat.TRANSLUCENT);
-        vlp.gravity = Gravity.CENTER;
-
-        try { wm.addView(root, vlp); volumePanel = root; } catch (Exception ignored) {}
-        ui.postDelayed(this::hideVolumePanel, 8000);
-    }
-
-    private void hideVolumePanel() {
-        if (volumePanel != null) {
-            try { wm.removeView(volumePanel); } catch (Exception ignored) {}
-            volumePanel = null;
+    private void hideMainPanel() {
+        if (mainPanel != null) {
+            try { wm.removeView(mainPanel); } catch (Exception ignored) {}
+            mainPanel = null;
         }
     }
 
@@ -621,8 +662,7 @@ public class RamBallService extends Service {
             int killed = 0;
             ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
             if (selected.isEmpty()) {
-                List<String[]> procs = listProcesses();
-                for (String[] p : procs) {
+                for (String[] p : listProcesses()) {
                     try { am.killBackgroundProcesses(p[0]); killed++; } catch (Exception ignored) {}
                 }
             } else {
@@ -631,12 +671,6 @@ public class RamBallService extends Service {
                     try { am.killBackgroundProcesses(pkg); killed++; } catch (Exception ignored) {}
                 }
             }
-            try {
-                Process pr = Runtime.getRuntime().exec(new String[]{"su", "-c", "sync; echo 1 > /proc/sys/vm/drop_caches"});
-                BufferedReader r = new BufferedReader(new InputStreamReader(pr.getInputStream()));
-                while (r.readLine() != null) { }
-                pr.waitFor();
-            } catch (Exception ignored) {}
             try { Thread.sleep(700); } catch (InterruptedException ignored) {}
             final long after = availMem();
             final int k = killed;
@@ -664,7 +698,7 @@ public class RamBallService extends Service {
     @Override public void onDestroy() {
         super.onDestroy();
         ui.removeCallbacksAndMessages(null);
-        hideVolumePanel(); hideProcPanel(); hideSettingsPanel();
+        hideMainPanel();
         if (wm != null && ball != null) { try { wm.removeView(ball); } catch (Exception ignored) {} }
     }
 
