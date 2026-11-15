@@ -90,7 +90,7 @@ public class RamBallService extends Service {
         Notification.Builder b = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(this, CH_ID) : new Notification.Builder(this);
         return b.setContentTitle("RamBall")
-                .setContentText("鐐?娓呯悊 闀挎寜=闊抽噺 鎮仠=杩涚▼ 鍙抽敭=璁剧疆")
+                .setContentText("点=清理 长按=音量 悬停=进程 右键=设置")
                 .setSmallIcon(android.R.drawable.ic_menu_manage)
                 .setOngoing(true).build();
     }
@@ -162,14 +162,19 @@ public class RamBallService extends Service {
                 case MotionEvent.ACTION_CANCEL: {
                     long dur = System.currentTimeMillis() - t0[0];
                     if (!moved[0]) {
-                        if (dur >= 600) showVolumePanel();
-                        else clean();
+                        if (dur >= 600) {
+                            showVolumePanel();
+                        } else {
+                            String act = sp.getString("click_action", "clean");
+                            if ("panel".equals(act)) showProcPanel();
+                            else if ("settings".equals(act)) showSettingsPanel();
+                            else clean();
+                        }
                     }
                     return true;
                 }
                 case MotionEvent.ACTION_BUTTON_PRESS: {
-                    int btn = e.getButtonState();
-                    if (btn == MotionEvent.BUTTON_SECONDARY) {
+                    if (e.getButtonState() == MotionEvent.BUTTON_SECONDARY) {
                         showSettingsPanel();
                         return true;
                     }
@@ -205,7 +210,7 @@ public class RamBallService extends Service {
 
     private void paint() {
         if (ball == null) return;
-        ball.setText("鈫? + curUp + "  鈫? + curDown + "\n"
+        ball.setText("\u2191" + curUp + "  \u2193" + curDown + "\n"
                 + "C " + (int) curCpu + "%   R " + curRamPct + "%");
         ball.setTextSize(sp.getFloat("font_size", 9f));
         ball.setAlpha(sp.getFloat("opacity", 1f));
@@ -274,13 +279,13 @@ public class RamBallService extends Service {
         root.setPadding(dp(12), dp(10), dp(12), dp(10));
 
         TextView title = new TextView(this);
-        title.setText("鍕鹃€夎娓呯悊鐨勮繘绋?);
+        title.setText("\u52fe\u9009\u8981\u6e05\u7406\u7684\u8fdb\u7a0b");
         title.setTextColor(Color.WHITE);
         title.setTextSize(11);
         root.addView(title);
 
-        Set<String> saved = sp.getStringSet("selected_pkgs", new HashSet<>());
-        List<String[]> procs = listProcesses(saved);
+        Set<String> saved = sp.getStringSet("selected_pkgs", new HashSet<String>());
+        List<String[]> procs = listProcesses();
 
         ScrollView sv = new ScrollView(this);
         LinearLayout list = new LinearLayout(this);
@@ -298,31 +303,31 @@ public class RamBallService extends Service {
         }
         if (procs.isEmpty()) {
             TextView empty = new TextView(this);
-            empty.setText("(娌℃湁鍙竻鐞嗙殑杩涚▼)");
+            empty.setText("(\u6ca1\u6709\u53ef\u6e05\u7406\u7684\u8fdb\u7a0b)");
             empty.setTextColor(Color.GRAY);
             empty.setTextSize(10);
             list.addView(empty);
         }
         sv.addView(list);
-        root.addView(sv, new LinearLayout.LayoutParams(dp(220), dp(220)));
+        root.addView(sv, new LinearLayout.LayoutParams(dp(220), dp(200)));
 
         LinearLayout btns = new LinearLayout(this);
         btns.setOrientation(LinearLayout.HORIZONTAL);
 
         Button clear = new Button(this);
-        clear.setText("鍏ㄤ笉閫?);
+        clear.setText("\u5168\u4e0d\u9009");
         clear.setTextSize(9);
         clear.setOnClickListener(v -> {
             for (int i = 0; i < list.getChildCount(); i++) {
                 View c = list.getChildAt(i);
                 if (c instanceof CheckBox) ((CheckBox) c).setChecked(false);
             }
-            sp.edit().putStringSet("selected_pkgs", new HashSet<>()).apply();
+            sp.edit().putStringSet("selected_pkgs", new HashSet<String>()).apply();
         });
         btns.addView(clear);
 
         Button done = new Button(this);
-        done.setText("瀹屾垚");
+        done.setText("\u5b8c\u6210");
         done.setTextSize(9);
         done.setOnClickListener(v -> hideProcPanel());
         btns.addView(done);
@@ -338,8 +343,10 @@ public class RamBallService extends Service {
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT);
         plp.gravity = Gravity.TOP | Gravity.END;
-        plp.x = dp(14);
-        plp.y = dp(180) + dp(56);
+        // follow the ball: same x, right below it
+        plp.x = lp.x;
+        int ballH = (ball != null && ball.getHeight() > 0) ? ball.getHeight() : dp(52);
+        plp.y = lp.y + ballH + dp(6);
 
         root.setOnHoverListener((v, e) -> {
             if (e.getAction() == MotionEvent.ACTION_HOVER_ENTER) ui.removeCallbacks(hideProcDelayed);
@@ -352,39 +359,60 @@ public class RamBallService extends Service {
 
     private void saveSelection() {
         if (procPanel == null) return;
-        Set<String> sel = new HashSet<>();
-        LinearLayout root = (LinearLayout) procPanel;
-        ScrollView sv = (ScrollView) root.getChildAt(1);
-        LinearLayout list = (LinearLayout) sv.getChildAt(0);
-        for (int i = 0; i < list.getChildCount(); i++) {
-            View c = list.getChildAt(i);
-            if (c instanceof CheckBox && ((CheckBox) c).isChecked())
-                sel.add((String) c.getTag());
-        }
-        sp.edit().putStringSet("selected_pkgs", sel).apply();
+        try {
+            LinearLayout root = (LinearLayout) procPanel;
+            ScrollView sv = (ScrollView) root.getChildAt(1);
+            LinearLayout list = (LinearLayout) sv.getChildAt(0);
+            Set<String> sel = new HashSet<>();
+            for (int i = 0; i < list.getChildCount(); i++) {
+                View c = list.getChildAt(i);
+                if (c instanceof CheckBox && ((CheckBox) c).isChecked())
+                    sel.add((String) c.getTag());
+            }
+            sp.edit().putStringSet("selected_pkgs", sel).apply();
+        } catch (Exception ignored) {}
     }
 
-    private List<String[]> listProcesses(Set<String> saved) {
+    private List<String[]> listProcesses() {
+        // getRunningAppProcesses() only returns our own process since Android 5.1,
+        // so enumerate through root's ps instead.
         List<String[]> out = new ArrayList<>();
-        ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
-        PackageManager pm = getPackageManager();
-        List<ActivityManager.RunningAppProcessInfo> list = am.getRunningAppProcesses();
-        if (list == null) return out;
         Set<String> seen = new HashSet<>();
-        for (ActivityManager.RunningAppProcessInfo p : list) {
-            if (p.importance < ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE) continue;
-            String pkg = p.processName;
-            if (pkg == null || pkg.contains(":")) continue;
-            if (ALWAYS_PROTECT.contains(pkg)) continue;
-            if (pkg.equals("cn.bvtv.beta")) continue;
-            if (!seen.add(pkg)) continue;
-            String label = pkg;
-            int mb = 0;
-            try {
-                ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
-                label = pm.getApplicationLabel(ai).toString();
-            } catch (Exception ignored) {}
-            out.add(new String[]{pkg, label, String.valueOf(mb)});
+        PackageManager pm = getPackageManager();
+        Process p = null;
+        try {
+            // toybox ps on this ROM does not support --no-headers, so skip the header row
+            p = Runtime.getRuntime().exec(new String[]{
+                    "su", "-c", "ps -A -o USER,NAME,RSS 2>/dev/null"});
+            BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
+            String line;
+            while ((line = r.readLine()) != null) {
+                String[] f = line.trim().split("\\s+");
+                if (f.length < 3) continue;
+                String user = f[0];
+                String name = f[1];
+                String rss = f[2];
+                if ("USER".equals(user)) continue;
+                if (name.startsWith("[")) continue;
+                if (!user.startsWith("u0_a")) continue;
+                if (name.contains(":")) continue;
+                if (name.equals(getPackageName())) continue;
+                if (ALWAYS_PROTECT.contains(name)) continue;
+                if (name.equals("cn.bvtv.beta")) continue;
+                if (!seen.add(name)) continue;
+                int mb = 0;
+                try { mb = (int) (Long.parseLong(rss) / 1024); } catch (Exception ignored) {}
+                String label = name;
+                try {
+                    ApplicationInfo ai = pm.getApplicationInfo(name, 0);
+                    label = pm.getApplicationLabel(ai).toString();
+                } catch (Exception ignored) {}
+                out.add(new String[]{name, label, String.valueOf(mb)});
+            }
+            p.waitFor();
+        } catch (Exception ignored) {
+        } finally {
+            if (p != null) try { p.destroy(); } catch (Exception ignored) {}
         }
         Collections.sort(out, (a, b) -> a[1].compareToIgnoreCase(b[1]));
         return out;
@@ -414,7 +442,7 @@ public class RamBallService extends Service {
         root.setPadding(dp(16), dp(12), dp(16), dp(16));
 
         TextView t = new TextView(this);
-        t.setText("璁剧疆");
+        t.setText("\u8bbe\u7f6e");
         t.setTextColor(Color.WHITE);
         t.setTextSize(12);
         root.addView(t);
@@ -422,7 +450,7 @@ public class RamBallService extends Service {
         final TextView fsVal = new TextView(this);
         fsVal.setTextColor(Color.parseColor("#FF90CAF9"));
         fsVal.setTextSize(10);
-        fsVal.setText("瀛楀彿 " + sp.getFloat("font_size", 9f));
+        fsVal.setText("\u5b57\u53f7 " + sp.getFloat("font_size", 9f));
         root.addView(fsVal);
 
         SeekBar fs = new SeekBar(this);
@@ -431,7 +459,7 @@ public class RamBallService extends Service {
         fs.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar s, int p, boolean u) {
                 float v = (p + 10) / 2f;
-                fsVal.setText("瀛楀彿 " + v);
+                fsVal.setText("\u5b57\u53f7 " + v);
                 sp.edit().putFloat("font_size", v).apply();
                 paint();
             }
@@ -443,7 +471,7 @@ public class RamBallService extends Service {
         final TextView opVal = new TextView(this);
         opVal.setTextColor(Color.parseColor("#FF90CAF9"));
         opVal.setTextSize(10);
-        opVal.setText("閫忔槑搴?" + (int) (sp.getFloat("opacity", 1f) * 100) + "%");
+        opVal.setText("\u900f\u660e\u5ea6 " + (int) (sp.getFloat("opacity", 1f) * 100) + "%");
         root.addView(opVal);
 
         SeekBar op = new SeekBar(this);
@@ -451,7 +479,7 @@ public class RamBallService extends Service {
         op.setProgress((int) (sp.getFloat("opacity", 1f) * 100));
         op.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar s, int p, boolean u) {
-                opVal.setText("閫忔槑搴?" + p + "%");
+                opVal.setText("\u900f\u660e\u5ea6 " + p + "%");
                 sp.edit().putFloat("opacity", p / 100f).apply();
                 paint();
             }
@@ -460,8 +488,42 @@ public class RamBallService extends Service {
         });
         root.addView(op, new LinearLayout.LayoutParams(dp(200), LinearLayout.LayoutParams.WRAP_CONTENT));
 
+        TextView caLabel = new TextView(this);
+        caLabel.setTextColor(Color.WHITE);
+        caLabel.setTextSize(11);
+        caLabel.setText("\u5355\u51fb\u884c\u4e3a");
+        root.addView(caLabel);
+
+        final String curAct = sp.getString("click_action", "clean");
+        final String[] acts = {"clean", "panel", "settings"};
+        final String[] actNames = {"\u6e05\u7406\u5185\u5b58", "\u5c55\u5f00\u8fdb\u7a0b", "\u6253\u5f00\u8bbe\u7f6e"};
+        LinearLayout actRow = new LinearLayout(this);
+        actRow.setOrientation(LinearLayout.HORIZONTAL);
+        for (int i = 0; i < acts.length; i++) {
+            final String key = acts[i];
+            final Button b = new Button(this);
+            b.setText((key.equals(curAct) ? "\u25cf " : "\u25cb ") + actNames[i]);
+            b.setTextSize(9);
+            b.setTag(key);
+            b.setOnClickListener(v -> {
+                sp.edit().putString("click_action", key).apply();
+                for (int j = 0; j < actRow.getChildCount(); j++) {
+                    View c = actRow.getChildAt(j);
+                    if (c instanceof Button) {
+                        String k = (String) c.getTag();
+                        String n = "clean".equals(k) ? "\u6e05\u7406\u5185\u5b58"
+                                : "panel".equals(k) ? "\u5c55\u5f00\u8fdb\u7a0b"
+                                : "\u6253\u5f00\u8bbe\u7f6e";
+                        ((Button) c).setText((k.equals(key) ? "\u25cf " : "\u25cb ") + n);
+                    }
+                }
+            });
+            actRow.addView(b);
+        }
+        root.addView(actRow);
+
         Button close = new Button(this);
-        close.setText("鍏抽棴");
+        close.setText("\u5173\u95ed");
         close.setTextSize(9);
         close.setOnClickListener(v -> hideSettingsPanel());
         root.addView(close);
@@ -503,7 +565,7 @@ public class RamBallService extends Service {
         root.setPadding(dp(22), dp(16), dp(22), dp(20));
 
         TextView title = new TextView(this);
-        title.setText("闊抽噺");
+        title.setText("\u97f3\u91cf");
         title.setTextColor(Color.WHITE);
         title.setTextSize(11);
         root.addView(title);
@@ -555,18 +617,13 @@ public class RamBallService extends Service {
     private void clean() {
         final long before = availMem();
         new Thread(() -> {
-            Set<String> selected = sp.getStringSet("selected_pkgs", new HashSet<>());
+            Set<String> selected = sp.getStringSet("selected_pkgs", new HashSet<String>());
             int killed = 0;
             ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
             if (selected.isEmpty()) {
-                List<ActivityManager.RunningAppProcessInfo> list = am.getRunningAppProcesses();
-                if (list != null) for (ActivityManager.RunningAppProcessInfo p : list) {
-                    if (p.importance < ActivityManager.RunningAppProcessInfo.IMPORTANCE_SERVICE) continue;
-                    String n = p.processName;
-                    if (n == null || n.contains(":")) continue;
-                    if (ALWAYS_PROTECT.contains(n) || n.equals("cn.bvtv.beta")) continue;
-                    am.killBackgroundProcesses(n);
-                    killed++;
+                List<String[]> procs = listProcesses();
+                for (String[] p : procs) {
+                    try { am.killBackgroundProcesses(p[0]); killed++; } catch (Exception ignored) {}
                 }
             } else {
                 for (String pkg : selected) {
@@ -587,8 +644,9 @@ public class RamBallService extends Service {
             ui.post(() -> {
                 sample(); paint();
                 Toast.makeText(this,
-                        (wasSel ? "娓呯悊宸查€夌殑 " + k + " 涓繘绋? : "娓呯悊 " + k + " 涓悗鍙拌繘绋?)
-                                + "锛岄噴鏀?" + Math.max(0, (after - before) / 1048576) + " MB",
+                        (wasSel ? "\u6e05\u7406\u5df2\u9009\u7684 " + k + " \u4e2a\u8fdb\u7a0b"
+                                : "\u6e05\u7406 " + k + " \u4e2a\u540e\u53f0\u8fdb\u7a0b")
+                                + "\uff0c\u91ca\u653e " + Math.max(0, (after - before) / 1048576) + " MB",
                         Toast.LENGTH_SHORT).show();
             });
         }).start();
