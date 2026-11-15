@@ -1,0 +1,97 @@
+From 07c6aee73a9d7bfd74568c4390c2d8625aee2a94 Mon Sep 17 00:00:00 2001
+From: m <m@l>
+Date: Sun, 15 Nov 2026 11:29:38 +0000
+Subject: [PATCH] fix(player): accumulate sub-step volume drag delta
+
+---
+ app/build.gradle.kts                          |  4 +-
+ .../component/player/PlayerGestureHandler.kt  | 51 ++++++++++++++++---
+ gradlew                                       |  0
+ 3 files changed, 45 insertions(+), 10 deletions(-)
+ mode change 100644 => 100755 gradlew
+
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index fd265ae..869992d 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -72,12 +72,12 @@ android {
+         }
+         debug {
+             isMinifyEnabled = false
+-            applicationIdSuffix = ".debug"
++            // applicationIdSuffix = ".debug"
+             // DEBUG 鍙繚鐣?x86_64锛氱敤浜?1080p TV 妯℃嫙鍣ㄨ仈璋冿紝鍑忓皯鎵撳寘鏃堕棿涓庡畨瑁呭寘浣撶Н銆?             // release 涓嶉檺鍒?ABI锛屼粛鍙鐩?arm64-v8a / armeabi-v7a 鐪熸満銆?             ndk {
+                 abiFilters.clear()
+-                abiFilters += "x86_64"
++                abiFilters += "arm64-v8a"
+             }
+         }
+     }
+diff --git a/app/src/main/kotlin/dev/frost819/newbv/app/ui/component/player/PlayerGestureHandler.kt b/app/src/main/kotlin/dev/frost819/newbv/app/ui/component/player/PlayerGestureHandler.kt
+index 47290e0..c6f2423 100644
+--- a/app/src/main/kotlin/dev/frost819/newbv/app/ui/component/player/PlayerGestureHandler.kt
++++ b/app/src/main/kotlin/dev/frost819/newbv/app/ui/component/player/PlayerGestureHandler.kt
+@@ -248,14 +248,49 @@ fun adjustVolume(
+     audioManager: AudioManager,
+     deltaY: Float,
+ ): Int {
+-    val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
++    // VOLUME_ACCUMULATE_PATCH:
++    // deltaY here is the per-frame delta, not the total drag. Dividing it by
++    // a step size and truncating means most frames produce 0 steps and the
++    // volume only jumps once the pointer happens to move far enough in one
++    // frame. That is why a mouse drag feels steppy while brightness (which is
++    // a continuous float) feels smooth.
++    //
++    // Fix: accumulate the remaining sub-step distance across calls and only
++    // consume it when a full step is reached. Also cache maxVolume and skip
++    // AudioService entirely when no step was crossed.
++    val maxVolume = VolumeGestureCache.maxVolume(audioManager)
++    if (maxVolume <= 0) return VolumeGestureCache.lastPercent
++
++    VolumeGestureCache.accumulator += deltaY
++    val stepSize = 40f
++    val deltaSteps = (VolumeGestureCache.accumulator / stepSize).toInt()
++    if (deltaSteps == 0) {
++        return VolumeGestureCache.lastPercent
++    }
++    VolumeGestureCache.accumulator -= deltaSteps * stepSize
++
+     val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+-    val deltaSteps = (deltaY / 80f).toInt()
+     val newVolume = (currentVolume + deltaSteps).coerceIn(0, maxVolume)
+-    audioManager.setStreamVolume(
+-        AudioManager.STREAM_MUSIC,
+-        newVolume,
+-        0,
+-    )
+-    return (newVolume.toFloat() / maxVolume.toFloat() * 100).toInt()
++    if (newVolume != currentVolume) {
++        audioManager.setStreamVolume(
++            AudioManager.STREAM_MUSIC,
++            newVolume,
++            0,
++        )
++    }
++    VolumeGestureCache.lastPercent = (newVolume.toFloat() / maxVolume.toFloat() * 100).toInt()
++    return VolumeGestureCache.lastPercent
++}
++
++private object VolumeGestureCache {
++    private var cachedMax = -1
++    var lastPercent = 50
++    var accumulator = 0f
++
++    fun maxVolume(audioManager: AudioManager): Int {
++        if (cachedMax <= 0) {
++            cachedMax = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
++        }
++        return cachedMax
++    }
+ }
+diff --git a/gradlew b/gradlew
+old mode 100644
+new mode 100755
+-- 
+2.56.1
+
