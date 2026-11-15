@@ -159,6 +159,7 @@ public class RamBallService extends Service {
                     int mx = (int) (dx[0] - e.getRawX());
                     int my = (int) (e.getRawY() - dy[0]);
                     if (Math.abs(mx) > 10 || Math.abs(my) > 10) {
+                        if (!moved[0]) hideMainPanel();   // dragging: get the panel out of the way
                         moved[0] = true;
                         lp.x = sx[0] + mx;
                         lp.y = sy[0] + my;
@@ -648,6 +649,7 @@ public class RamBallService extends Service {
         android.app.usage.UsageStatsManager usm =
                 (android.app.usage.UsageStatsManager) getSystemService(Context.USAGE_STATS_SERVICE);
         long now = System.currentTimeMillis();
+        long lastCleanTime = sp.getLong("last_clean_time", 0L);
         java.util.List<android.app.usage.UsageStats> stats = null;
         try {
             stats = usm.queryUsageStats(android.app.usage.UsageStatsManager.INTERVAL_DAILY,
@@ -667,6 +669,10 @@ public class RamBallService extends Service {
             if (pkg.equals(getPackageName())) continue;
             if (ALWAYS_PROTECT.contains(pkg)) continue;
             if (pkg.equals("cn.bvtv.beta")) continue;
+            // anything that has not been used since the last clean is hidden:
+            // otherwise a cleaned app looks like it is still running just because
+            // UsageStats keeps its historical record.
+            if (s.getLastTimeUsed() <= lastCleanTime) continue;
             if (!seen.add(pkg)) continue;
             if (!hasLauncher(pm, pkg)) continue;
 
@@ -710,6 +716,7 @@ public class RamBallService extends Service {
 
     private void clean() {
         final long before = availMem();
+        android.util.Log.i("RamBall", "clean() start, availBefore=" + (before / 1048576) + "MB");
         new Thread(() -> {
             Set<String> selected = sp.getStringSet("selected_pkgs", new HashSet<String>());
             int killed = 0;
@@ -728,6 +735,11 @@ public class RamBallService extends Service {
             final long after = availMem();
             final int k = killed;
             final boolean wasSel = !selected.isEmpty();
+            // remember the cut-off so cleaned apps disappear from the list until
+            // the user actually opens them again
+            sp.edit().putLong("last_clean_time", System.currentTimeMillis()).apply();
+            android.util.Log.i("RamBall", "clean() done killed=" + k
+                    + " freed=" + ((availMem() - before) / 1048576) + "MB");
             ui.post(() -> {
                 sample(); paint();
                 Toast.makeText(this,
