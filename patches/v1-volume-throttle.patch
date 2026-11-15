@@ -1,0 +1,92 @@
+From becd3e6c899fc9f777294cda5b6051f79e947c5b Mon Sep 17 00:00:00 2001
+From: root
+ <root@runnervmccnms.1pto2rqn0teefir31qk02ak41c.xx.internal.cloudapp.net>
+Date: Sun, 15 Nov 2026 07:40:50 +0000
+Subject: [PATCH] fix(player): throttle volume gesture IPC to AudioService
+
+---
+ app/build.gradle.kts                          |  5 ++-
+ .../component/player/PlayerGestureHandler.kt  | 44 +++++++++++++++----
+ gradlew                                       |  0
+ 3 files changed, 39 insertions(+), 10 deletions(-)
+ mode change 100644 => 100755 gradlew
+
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index fd265ae..631ab09 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -72,12 +72,13 @@ android {
+         }
+         debug {
+             isMinifyEnabled = false
+-            applicationIdSuffix = ".debug"
++            // applicationIdSuffix = ".debug"  // patched: same package id
+             // DEBUG 鍙繚鐣?x86_64锛氱敤浜?1080p TV 妯℃嫙鍣ㄨ仈璋冿紝鍑忓皯鎵撳寘鏃堕棿涓庡畨瑁呭寘浣撶Н銆?             // release 涓嶉檺鍒?ABI锛屼粛鍙鐩?arm64-v8a / armeabi-v7a 鐪熸満銆?             ndk {
+                 abiFilters.clear()
+-                abiFilters += "x86_64"
++                // patched: build arm64 for the real device instead of x86_64 emulator
++                abiFilters += "arm64-v8a"
+             }
+         }
+     }
+diff --git a/app/src/main/kotlin/dev/frost819/newbv/app/ui/component/player/PlayerGestureHandler.kt b/app/src/main/kotlin/dev/frost819/newbv/app/ui/component/player/PlayerGestureHandler.kt
+index 47290e0..7abf7f1 100644
+--- a/app/src/main/kotlin/dev/frost819/newbv/app/ui/component/player/PlayerGestureHandler.kt
++++ b/app/src/main/kotlin/dev/frost819/newbv/app/ui/component/player/PlayerGestureHandler.kt
+@@ -248,14 +248,42 @@ fun adjustVolume(
+     audioManager: AudioManager,
+     deltaY: Float,
+ ): Int {
+-    val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+-    val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
++    // VOLUME_THROTTLE_PATCH:
++    // The old implementation called getStreamMaxVolume + getStreamVolume +
++    // setStreamVolume on EVERY pointer event (~60-120 Hz). That is 3 binder
++    // round-trips per frame to AudioService on the main thread, which is why
++    // the right-half volume gesture felt laggy while the left-half brightness
++    // gesture (a pure Window attribute write) stayed smooth.
++    val maxVolume = VolumeGestureCache.maxVolume(audioManager)
++    if (maxVolume <= 0) return VolumeGestureCache.lastPercent
++
+     val deltaSteps = (deltaY / 80f).toInt()
++    if (deltaSteps == 0) {
++        // Sub-step movement: do not touch AudioService at all.
++        return VolumeGestureCache.lastPercent
++    }
++
++    val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+     val newVolume = (currentVolume + deltaSteps).coerceIn(0, maxVolume)
+-    audioManager.setStreamVolume(
+-        AudioManager.STREAM_MUSIC,
+-        newVolume,
+-        0,
+-    )
+-    return (newVolume.toFloat() / maxVolume.toFloat() * 100).toInt()
++    if (newVolume != currentVolume) {
++        audioManager.setStreamVolume(
++            AudioManager.STREAM_MUSIC,
++            newVolume,
++            0,
++        )
++    }
++    VolumeGestureCache.lastPercent = (newVolume.toFloat() / maxVolume.toFloat() * 100).toInt()
++    return VolumeGestureCache.lastPercent
++}
++
++private object VolumeGestureCache {
++    private var cachedMax = -1
++    var lastPercent = 50
++
++    fun maxVolume(audioManager: AudioManager): Int {
++        if (cachedMax <= 0) {
++            cachedMax = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
++        }
++        return cachedMax
++    }
+ }
+diff --git a/gradlew b/gradlew
+old mode 100644
+new mode 100755
+-- 
+2.56.1
+
