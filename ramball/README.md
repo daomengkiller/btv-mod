@@ -1,75 +1,77 @@
-# RamBall — 安卓悬浮球内存清理 + 实时监控
+# RamBall — 安卓悬浮球：实时监控 + 进程选择清理
 
-给 W603E-MH（2GB RAM / Android 11）这类低配设备用的常驻悬浮球。
+给低配设备（2GB RAM / Android 11）用的常驻悬浮球。**24 KB**，零第三方依赖。
 
-## 功能
-
-**常驻显示**（每秒刷新）：
+## 悬浮球显示
 
 ```
 ↑1.2M  ↓3.4M
 C 45%   R 62%
 ```
 
-- `↑/↓` 上下行实时网速（读 `/proc/net/dev` 差分）
-- `C` CPU 占用百分比（读 `/proc/stat` 差分）
-- `R` 内存占用百分比（`ActivityManager.MemoryInfo`）
-- RAM 超 70% 变橙色，超 85% 变红色
+- `↑/↓` 实时上下行网速（`/proc/net/dev` 差分）
+- `C` CPU 占用（`/proc/stat` 差分）
+- `R` 内存占用（`MemoryInfo`）
+- RAM > 70% 橙字，> 85% 红字
+- 每秒刷新一次
 
-**操作**：
+## 交互
 
-| 手势 | 行为 |
+| 操作 | 行为 |
 |---|---|
-| 单击 | 清理内存（`killBackgroundProcesses` + `drop_caches`），Toast 显示释放量 |
-| 长按 ≥600ms | 弹出音量滑块面板（8 秒后自动消失） |
-| 拖动 | 移动位置 |
+| **鼠标悬浮** | 展开进程勾选面板（列出所有可见级以上的应用进程） |
+| **勾选进程** | 立即写入 SharedPreferences，下次启动仍保留 |
+| **单击** | 清理已勾选的进程；没勾任何进程时清理全部后台进程 |
+| **长按 ≥600ms** | 弹出音量滑块（8 秒自动收起） |
+| **鼠标右键** | 打开设置（字号 5–14、透明度 10–100%） |
+| **拖动** | 移动悬浮球位置 |
 
-## 保护名单
+悬浮球移开鼠标后有 700 ms 宽限期，够你从球移到进程面板上；鼠标进入面板会取消隐藏。
 
-以下进程不会被误杀：
+## 进程保护
+
+永久排除，勾不到也杀不掉：
 
 ```
-com.farmerbb.taskbar    cu.axel.smartdock    cn.bvtv.beta
-android                 com.android.systemui  com.android.phone
+com.farmerbb.taskbar     cu.axel.smartdock      cn.bvtv.beta
+android                  com.android.systemui   com.android.phone
 com.littlesauce.ramball
 ```
 
-## 权限
+只列 `importance >= IMPORTANCE_VISIBLE` 的进程，且跳过带 `:` 的子进程。
 
-- `SYSTEM_ALERT_WINDOW`（悬浮窗，必须手动授予）
-- `FOREGROUND_SERVICE`（前台服务保活）
-- `KILL_BACKGROUND_PROCESSES`
+## 清理做了什么
 
-`drop_caches` 需要 root，通过 `su -c` 调用；没有 root 时只是跳过这一步。
+1. `ActivityManager.killBackgroundProcesses()` × 勾选的包（或全部后台）
+2. `su -c "sync; echo 1 > /proc/sys/vm/drop_caches"` 释放页缓存
+3. 等 700 ms 后重新采样，Toast 报「清理 N 个进程，释放 X MB」
 
-## 安装
+`drop_caches` 需要 root；没有 root 时静默跳过，只做 kill。
 
-```bash
-adb install -r -g RamBall.apk
-adb shell appops set com.littlesauce.ramball SYSTEM_ALERT_WINDOW allow
-adb shell am start-foreground-service -n com.littlesauce.ramball/.RamBallService
-```
+## 字符编码说明
 
-或打开 app 按三个按钮走一遍。
+`TextView` 里用的 `↑ ↓` 是 U+2191 / U+2193，Java 源文件必须 UTF-8 编码
+（`gradle.properties` 里设了 `-Dfile.encoding=UTF-8`）。
 
 ## 构建
 
-```bash
-# 需要 gradle.properties 里有 android.useAndroidX=true
+```
 ./gradlew assembleDebug
 ```
 
-注意 `gradle.properties` 必须包含：
+`gradle.properties` 必须有：
 
 ```
 android.useAndroidX=true
 ```
 
-否则 appcompat 依赖会报 `Configuration contains AndroidX dependencies`。
+即使本项目不用 AndroidX 也要留着——AGP 8.x 在检查 `:app:debugRuntimeClasspath`
+时会因为其他原因报错。**不要**加 `androidx.appcompat` 依赖：v1 加了它，
+APK 2.9 MB / PSS 147 MB；v2 去掉后 APK **24 KB** / PSS **38 MB**。
 
-## 已知问题
+## 版本对比
 
-- 进程 PSS 约 147 MB（appcompat 依赖 + 每秒刷新）。如果嫌大，可以去掉
-  `androidx.appcompat` 依赖（本项目实际只用到 `Activity` 和 `Settings`，
-  不需要 appcompat），PSS 能降到 40 MB 以内。
-- 悬浮球默认在右上角 (16, 200)，可以拖到任意位置。
+| 版本 | APK | PSS | 功能 |
+|---|---|---|---|
+| v1 | 2.89 MB | 147 MB | 监控 + 点击清理 + 长按音量 |
+| v2 | **24 KB** | **38 MB** | + 悬浮进程勾选 + 右键设置 + 字号/透明度 |
