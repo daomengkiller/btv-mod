@@ -12,25 +12,28 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 public class MainActivity extends Activity {
-    @Override
-    protected void onCreate(Bundle b) {
+    @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(48, 96, 48, 48);
 
         TextView tv = new TextView(this);
-        tv.setText("RamBall 鈥?鐐逛竴涓嬫竻鍐呭瓨\n\n1) 鎺堜簣鎮诞绐楁潈闄怽n2) 鍚姩鎮诞鐞僜n3) 鍗￠】鏃剁偣鐞?);
-        tv.setTextSize(16);
+        tv.setText("RamBall 2.0\n\n" +
+                "路 鎮诞鐞冩樉绀哄疄鏃剁綉閫?/ CPU / 鍐呭瓨\n" +
+                "路 榧犳爣鎮诞 鈫?杩涚▼鍕鹃€夐潰鏉匡紙鍕惧畬鑷姩璁颁綇锛塡n" +
+                "路 鍗曞嚮 鈫?娓呯悊宸插嬀閫夌殑杩涚▼\n" +
+                "路 闀挎寜 鈫?闊抽噺婊戝潡\n" +
+                "路 鍙抽敭 鈫?璁剧疆锛堝瓧鍙?/ 閫忔槑搴︼級\n" +
+                "路 鎷栧姩 鈫?绉诲姩浣嶇疆");
+        tv.setTextSize(15);
         root.addView(tv);
 
         Button grant = new Button(this);
         grant.setText("1. 鎺堜簣鎮诞绐楁潈闄?);
-        grant.setOnClickListener(v -> {
-            Intent i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + getPackageName()));
-            startActivity(i);
-        });
+        grant.setOnClickListener(v -> startActivity(new Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:" + getPackageName()))));
         root.addView(grant);
 
         Button start = new Button(this);
@@ -41,11 +44,9 @@ public class MainActivity extends Activity {
                 return;
             }
             Intent svc = new Intent(this, RamBallService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                startForegroundService(svc);
-            else
-                startService(svc);
-            Toast.makeText(this, "鎮诞鐞冨凡鍚姩", Toast.LENGTH_SHORT).show();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(svc);
+            else startService(svc);
+            Toast.makeText(this, "宸插惎鍔?, Toast.LENGTH_SHORT).show();
             finish();
         });
         root.addView(start);
